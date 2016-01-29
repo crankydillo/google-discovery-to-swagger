@@ -2,7 +2,7 @@
 
 var assert = require('assert');
 var _ = require('lodash');
-var URI = require('URIjs');
+var URI = require('urijs');
 var MimeLookup = require('mime-lookup');
 var MIME = new MimeLookup(require('mime-db'));
 var jsonCompat = require('json-schema-compatibility');
@@ -34,7 +34,7 @@ exports.convert = function (data) {
   //	baseUrl
   //	basePath
 
-  var rootUrl = URI(data.rootUrl);
+  var rootUrl = URI(data.rootUrl || '');
   var srGlobalRefParameters = [];
   var srGlobalParameters = processGlobalParameters(data.parameters, srGlobalRefParameters);
 
@@ -232,8 +232,15 @@ function convertMime(list) {
 
 function processMethod(method) {
   var srResponse = {
-    description: 'Successful response',
-  };
+		description: 'Successful response',
+	  },
+	  errMsg = _.partial(processingErrorMsg('method'), method.id, _),
+	  processSchemaRef = function processSchemaRef(data, location) {
+		assert.ok('$ref' in data, errMsg('the ' + location + '\'s schema reference does not contain $ref'));
+		return {
+		  $ref: fixRef(data.$ref)
+		};
+	  };
 
   var srMethod = {
     description: method.description,
@@ -258,7 +265,7 @@ function processMethod(method) {
     srParameters.push({
       name: request.parameterName || 'body',
       in: 'body',
-      schema: processSchemaRef(request)
+      schema: processSchemaRef(request, 'request')
     });
   }
 
@@ -266,20 +273,19 @@ function processMethod(method) {
     srMethod.parameters = srParameters;
 
   if ('response' in method)
-    srResponse.schema = processSchemaRef(method.response);
+    srResponse.schema = processSchemaRef(method.response, 'response');
 
-  if ('scopes' in method)
-    srMethod.security = [{ Oauth2: method.scopes}];
+  if ('scopes' in method) {
+    srMethod.security = _.map(method.scopes, function (scope) {
+      return {
+        Oauth2: [scope]
+      };
+    });
+  }
 
   return srMethod;
 }
 
-function processSchemaRef(data) {
-  assert.ok('$ref' in data, 'schema reference does not contain $ref');
-  return {
-    $ref: fixRef(data.$ref)
-  };
-}
 
 function processParameterList(method) {
   var parameters = method.parameters || [];
@@ -303,20 +309,36 @@ function processParameterList(method) {
   return srParameters;
 }
 
+function processingErrorMsg(type) {
+	function unknown(v) {
+		return v || "<unknown>";
+	}
+	return function(name, msg) {
+		return 'There was a problem processing the ' + unknown(type) + ', ' +
+		   	unknown(name) + ', error:  ' + msg;
+	};
+}
+
 function processParameter(name, param) {
-  assert.ok(!('$ref' in param), 'parameter cannot contain $ref: '+param);
-  assert.ok(['query', 'path'].indexOf(param.location) > -1, 'parameter location must be \'query\' or \'path\'');
-  assert.ok(['string', 'number', 'integer', 'boolean'].indexOf(param.type) >= 0, 'type specified not supported');
-  assert.ok(!('properties' in param), 'parameters cannot contain properties');
-  assert.ok(!('additionalProperties' in param), 'parameters cannot contain additionalProperties');
-  assert.ok(!('annotations' in param), 'properties cannot contain annotations');
+  var supportedTypes = ['string', 'number', 'integer', 'boolean'],
+	  errMsg = _.partial(processingErrorMsg('parameter'), name, _);
+ 
+  assert.ok(!('$ref' in param), errMsg('parameter cannot contain $ref'));
+  assert.ok(['query', 'path'].indexOf(param.location) > -1, 
+			errMsg('parameter location must be \'query\' or \'path\'; was \'' + param.location + '\'.'));
+  assert.ok(supportedTypes.indexOf(param.type) >= 0, 
+			errMsg('parameter type must be one of ' + _.map(supportedTypes, function(t) { return '\'' + t + '\''; }).join(', ') + 
+				   '; was \'' + param.type + '\''));
+  assert.ok(!('properties' in param), errMsg('parameters cannot contain properties'));
+  assert.ok(!('additionalProperties' in param), errMsg('parameters cannot contain additionalProperties'));
+  assert.ok(!('annotations' in param), errMsg('parameters cannot contain annotations'));
 
   var srParam = {
     name: name,
     in: param.location,
     description: param.description,
     required: param.required,
-    default: processDefault(param)
+    default: processDefault(name, param)
   };
 
   if (param.repeated) {
@@ -348,11 +370,13 @@ function processType(type) {
 }
 
 
-function processDefault(param) {
+function processDefault(name, param) {
+  var errMsg = _.partial(processingErrorMsg('parameter'), name, _);
+
   if (!('default' in param))
     return undefined;
 
-  assert.ok(_.isString(param.default), 'default parameter must be a string: '+param);
+  assert.ok(_.isString(param.default), errMsg('default parameter must be a string: '+param));
   if (param.type !== 'string')
     param.default = JSON.parse(param.default);
 
@@ -361,7 +385,7 @@ function processDefault(param) {
     integer: 'number',
     boolean: 'boolean',
     string: 'string'
-  }[param.type], typeof param.default, 'parameter must be number, boolean, string');
+  }[param.type], typeof param.default, errMsg('parameter must be number, boolean, string'));
 
   //Google for some reason encode default values for enums like that
   //SOME_PREFIX_VALUE
@@ -372,7 +396,7 @@ function processDefault(param) {
     var candidate;
     _.each(param.enum, function (value) {
       if (lower.slice(-value.length) === value) {
-         assert.equal(candidate, undefined, 'unable to derive default');
+         assert.equal(candidate, undefined, errMsg('unable to derive default'));
          candidate = value;
       }
     });
